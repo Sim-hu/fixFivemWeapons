@@ -111,17 +111,16 @@ function expandArchives(sourceFiles: Map<string, Uint8Array>, issues: AnalyzeIss
   return expanded;
 }
 
-export async function analyzeSourceFiles(
-  sourceFiles: Map<string, Uint8Array>,
-  sourceFileName: string,
-): Promise<AnalyzeResult> {
-  const issues: AnalyzeIssue[] = [];
+// stream/data 分類・RSC7 検証・重複解決の共通ロジック。単一リソースモードと
+// フォルダ分割モードの両方から使う。
+async function buildAnalyzeResult(
+  files: Map<string, Uint8Array>,
+  issues: AnalyzeIssue[],
+): Promise<{ resolved: ResolvedFile[]; conflicts: ConflictGroup[] }> {
   const grouped = new Map<string, { sourcePath: string; data: Uint8Array }[]>();
-  const expandedFiles = expandArchives(sourceFiles, issues);
 
-  for (const [rawPath, data] of expandedFiles) {
-    const normalized = normalizeArchivePath(rawPath);
-    if (!normalized || shouldExcludeFromResource(normalized)) continue;
+  for (const [normalized, data] of files) {
+    if (shouldExcludeFromResource(normalized)) continue;
 
     const ext = getExtension(normalized);
 
@@ -179,17 +178,136 @@ export async function analyzeSourceFiles(
       issues.push({
         severity: "warning",
         path: resourcePath,
-        message: `中身が異なる${list.length}個のファイルが同名(${resourcePath})になります。FiveMの stream/ はフラットな名前空間のため1つしか配置できません。採用するファイルを選んでください。`,
+        message: `中身が異なる${list.length}個のファイルが同名(${resourcePath})になります。FiveMの stream/ はフラットな名前空間のため1つしか配置できません。採用するファイルを選ぶか、フォルダ単位で別リソースに分割してください。`,
       });
     }
   }
 
   resolved.sort((a, b) => a.resourcePath.localeCompare(b.resourcePath));
+  return { resolved, conflicts };
+}
+
+export async function analyzeSourceFiles(
+  sourceFiles: Map<string, Uint8Array>,
+  sourceFileName: string,
+): Promise<AnalyzeResult> {
+  const issues: AnalyzeIssue[] = [];
+  const expandedFiles = expandArchives(sourceFiles, issues);
+
+  const normalizedFiles = new Map<string, Uint8Array>();
+  for (const [rawPath, data] of expandedFiles) {
+    const normalized = normalizeArchivePath(rawPath);
+    if (normalized) normalizedFiles.set(normalized, data);
+  }
+
+  const { resolved, conflicts } = await buildAnalyzeResult(normalizedFiles, issues);
 
   const rootNameGuess =
     detectVehicleModelName(resolved) ?? sanitizeResourceName(sourceFileName.replace(/\.(zip|rpf)$/i, ""));
 
   return { resolved, conflicts, issues, rootNameGuess };
+}
+
+// --- フォルダ単位で複数リソースに分割するモード ---
+// GTA5-Mods の武器コレクション (例: 20種類の武器を1つの zip にまとめたもの) は
+// 各武器フォルダが同じ名前の共有アタッチメント (サプレッサー等) を少しずつ違う
+// 中身で持っていることが多く、単一リソースに統合しようとすると大量の競合が
+// 発生して手動解決が非現実的になる。フォルダ単位でそれぞれ独立した FiveM
+// リソースとして出力すれば、各グループ内で重複しない限り競合は発生しない。
+
+// stream/data の中間パスなど、武器名グルーピングの手がかりにならない
+// 構造的なディレクトリ名を除外して、意味のある最初のセグメントを探す。
+const STRUCTURAL_SEGMENTS = new Set([
+  "stream",
+  "data",
+  "meta",
+  "metas",
+  "x64",
+  "models",
+  "cdimages",
+  "common",
+  "anim",
+  "levels",
+  "props",
+  "weapons",
+]);
+
+function guessGroupKey(normalizedPath: string): string {
+  const segments = normalizedPath.split("/").slice(0, -1);
+  for (const seg of segments) {
+    const lower = seg.toLowerCase();
+    if (STRUCTURAL_SEGMENTS.has(lower)) continue;
+    if (lower.endsWith(".rpf")) continue;
+    return seg;
+  }
+  return "(root)";
+}
+
+export interface ResourceGroupResult {
+  groupKey: string;
+  resourceName: string;
+  resolved: ResolvedFile[];
+  conflicts: ConflictGroup[];
+}
+
+export interface GroupedAnalyzeResult {
+  groups: ResourceGroupResult[];
+  issues: AnalyzeIssue[];
+}
+
+export async function analyzeSourceFilesAsGroups(
+  sourceFiles: Map<string, Uint8Array>,
+): Promise<GroupedAnalyzeResult> {
+  const issues: AnalyzeIssue[] = [];
+  const expandedFiles = expandArchives(sourceFiles, issues);
+
+  const byGroup = new Map<string, Map<string, Uint8Array>>();
+  for (const [rawPath, data] of expandedFiles) {
+    const normalized = normalizeArchivePath(rawPath);
+    if (!normalized) continue;
+    const groupKey = guessGroupKey(normalized);
+    const bucket = byGroup.get(groupKey) ?? new Map<string, Uint8Array>();
+    bucket.set(normalized, data);
+    byGroup.set(groupKey, bucket);
+  }
+
+  const usedNames = new Set<string>();
+  const groups: ResourceGroupResult[] = [];
+  for (const [groupKey, files] of byGroup) {
+    const groupIssues: AnalyzeIssue[] = [];
+    const { resolved, conflicts } = await buildAnalyzeResult(files, groupIssues);
+    if (resolved.length === 0 && conflicts.length === 0) continue;
+
+    for (const issue of groupIssues) issues.push({ ...issue, path: `${groupKey}/${issue.path}` });
+
+    let resourceName = sanitizeResourceName(groupKey);
+    while (usedNames.has(resourceName)) resourceName = `${resourceName}_2`;
+    usedNames.add(resourceName);
+
+    groups.push({ groupKey, resourceName, resolved, conflicts });
+  }
+
+  groups.sort((a, b) => a.groupKey.localeCompare(b.groupKey));
+  return { groups, issues };
+}
+
+export function applyGroupConflictResolutions(
+  groups: ResourceGroupResult[],
+  selections: Map<string, string>, // `${groupKey}::${resourcePath}` -> 選択された sourcePath
+): { groupKey: string; resourceName: string; files: ResolvedFile[] }[] {
+  return groups.map((group) => {
+    const files = [...group.resolved];
+    for (const conflict of group.conflicts) {
+      const key = `${group.groupKey}::${conflict.resourcePath}`;
+      const chosenSourcePath = selections.get(key) ?? conflict.candidates[0]?.sourcePath;
+      const chosen = conflict.candidates.find((c) => c.sourcePath === chosenSourcePath) ?? conflict.candidates[0];
+      if (chosen) {
+        files.push({ resourcePath: conflict.resourcePath, sourcePath: chosen.sourcePath, data: chosen.data });
+      }
+    }
+    files.sort((a, b) => a.resourcePath.localeCompare(b.resourcePath));
+    return { groupKey: group.groupKey, resourceName: group.resourceName, files };
+  });
 }
 
 export function applyConflictResolutions(

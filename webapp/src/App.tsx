@@ -3,78 +3,126 @@ import { zipSync } from "fflate";
 import { DropZone } from "./components/DropZone";
 import { IssueList } from "./components/IssueList";
 import { ConflictResolver } from "./components/ConflictResolver";
+import { GroupedResultView } from "./components/GroupedResultView";
 import {
   analyzeSourceFiles,
+  analyzeSourceFilesAsGroups,
   applyConflictResolutions,
+  applyGroupConflictResolutions,
   buildFxManifest,
   sanitizeResourceName,
   type AnalyzeResult,
+  type GroupedAnalyzeResult,
 } from "./lib/resource-builder";
+
+type Mode = "single" | "split";
 
 function App() {
   const [sourceName, setSourceName] = useState("");
+  const [rawSourceFiles, setRawSourceFiles] = useState<Map<string, Uint8Array> | null>(null);
+  const [mode, setMode] = useState<Mode>("single");
   const [analyzing, setAnalyzing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<AnalyzeResult | null>(null);
-  const [selections, setSelections] = useState<Map<string, string>>(new Map());
+
+  const [singleResult, setSingleResult] = useState<AnalyzeResult | null>(null);
+  const [singleSelections, setSingleSelections] = useState<Map<string, string>>(new Map());
   const [resourceName, setResourceName] = useState("");
+
+  const [groupedResult, setGroupedResult] = useState<GroupedAnalyzeResult | null>(null);
+  const [groupSelections, setGroupSelections] = useState<Map<string, string>>(new Map());
+
   const [downloading, setDownloading] = useState(false);
 
-  const reset = useCallback(() => {
+  const resetResults = useCallback(() => {
     setError(null);
-    setResult(null);
-    setSelections(new Map());
+    setSingleResult(null);
+    setGroupedResult(null);
+    setSingleSelections(new Map());
+    setGroupSelections(new Map());
+  }, []);
+
+  const runAnalysis = useCallback(async (files: Map<string, Uint8Array>, name: string, targetMode: Mode) => {
+    setAnalyzing(true);
+    setError(null);
+    try {
+      if (targetMode === "single") {
+        const analyzed = await analyzeSourceFiles(files, name);
+        setSingleResult(analyzed);
+        setResourceName(analyzed.rootNameGuess);
+      } else {
+        const analyzed = await analyzeSourceFilesAsGroups(files);
+        setGroupedResult(analyzed);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "解析に失敗しました");
+    } finally {
+      setAnalyzing(false);
+    }
   }, []);
 
   const handleLoaded = useCallback(
     async (sourceFiles: Map<string, Uint8Array>, name: string) => {
-      reset();
-      setAnalyzing(true);
+      resetResults();
+      setRawSourceFiles(sourceFiles);
       setSourceName(name);
-      try {
-        const analyzed = await analyzeSourceFiles(sourceFiles, name);
-        setResult(analyzed);
-        setResourceName(analyzed.rootNameGuess);
-      } catch (e) {
-        setError(e instanceof Error ? e.message : "解析に失敗しました");
-      } finally {
-        setAnalyzing(false);
-      }
+      await runAnalysis(sourceFiles, name, mode);
     },
-    [reset],
+    [resetResults, runAnalysis, mode],
   );
 
-  const handleError = useCallback((message: string) => {
-    reset();
-    setError(message);
-  }, [reset]);
+  const handleError = useCallback(
+    (message: string) => {
+      resetResults();
+      setError(message);
+    },
+    [resetResults],
+  );
 
-  const handleSelect = useCallback((resourcePath: string, sourcePath: string) => {
-    setSelections((prev) => {
-      const next = new Map(prev);
-      next.set(resourcePath, sourcePath);
-      return next;
-    });
+  const handleModeChange = useCallback(
+    async (newMode: Mode) => {
+      setMode(newMode);
+      if (!rawSourceFiles) return;
+      if (newMode === "single" && singleResult) return;
+      if (newMode === "split" && groupedResult) return;
+      await runAnalysis(rawSourceFiles, sourceName, newMode);
+    },
+    [rawSourceFiles, sourceName, singleResult, groupedResult, runAnalysis],
+  );
+
+  const handleSingleSelect = useCallback((resourcePath: string, sourcePath: string) => {
+    setSingleSelections((prev) => new Map(prev).set(resourcePath, sourcePath));
   }, []);
 
-  const unresolvedConflicts = useMemo(() => {
-    if (!result) return 0;
-    return result.conflicts.filter((c) => !selections.has(c.resourcePath)).length;
-  }, [result, selections]);
+  const handleGroupSelect = useCallback((key: string, sourcePath: string) => {
+    setGroupSelections((prev) => new Map(prev).set(key, sourcePath));
+  }, []);
 
-  const errorCount = useMemo(
-    () => result?.issues.filter((i) => i.severity === "error").length ?? 0,
-    [result],
-  );
+  const unresolvedSingleConflicts = useMemo(() => {
+    if (!singleResult) return 0;
+    return singleResult.conflicts.filter((c) => !singleSelections.has(c.resourcePath)).length;
+  }, [singleResult, singleSelections]);
 
-  const handleDownload = useCallback(async () => {
-    if (!result) return;
+  const unresolvedGroupConflicts = useMemo(() => {
+    if (!groupedResult) return 0;
+    return groupedResult.groups.reduce(
+      (n, g) => n + g.conflicts.filter((c) => !groupSelections.has(`${g.groupKey}::${c.resourcePath}`)).length,
+      0,
+    );
+  }, [groupedResult, groupSelections]);
+
+  const errorCount = useMemo(() => {
+    const issues = mode === "single" ? singleResult?.issues : groupedResult?.issues;
+    return issues?.filter((i) => i.severity === "error").length ?? 0;
+  }, [mode, singleResult, groupedResult]);
+
+  const handleDownloadSingle = useCallback(async () => {
+    if (!singleResult) return;
     setDownloading(true);
     try {
       await new Promise((r) => setTimeout(r, 0));
-      const files = applyConflictResolutions(result, selections);
+      const files = applyConflictResolutions(singleResult, singleSelections);
       const manifest = buildFxManifest(files);
-      const rootName = sanitizeResourceName(resourceName || result.rootNameGuess);
+      const rootName = sanitizeResourceName(resourceName || singleResult.rootNameGuess);
 
       const zipInput: Record<string, Uint8Array> = {
         [`${rootName}/fxmanifest.lua`]: new TextEncoder().encode(manifest),
@@ -83,21 +131,36 @@ function App() {
         zipInput[`${rootName}/${file.resourcePath}`] = file.data;
       }
 
-      const zipped = zipSync(zipInput);
-      const blob = new Blob([zipped as Uint8Array<ArrayBuffer>], { type: "application/zip" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${rootName}_fivem_resource.zip`;
-      a.click();
-      URL.revokeObjectURL(url);
+      downloadZip(zipInput, `${rootName}_fivem_resource.zip`);
     } finally {
       setDownloading(false);
     }
-  }, [result, selections, resourceName]);
+  }, [singleResult, singleSelections, resourceName]);
 
-  const streamCount = result?.resolved.filter((f) => f.resourcePath.startsWith("stream/")).length ?? 0;
-  const dataCount = result?.resolved.filter((f) => f.resourcePath.startsWith("data/")).length ?? 0;
+  const handleDownloadGroups = useCallback(async () => {
+    if (!groupedResult) return;
+    setDownloading(true);
+    try {
+      await new Promise((r) => setTimeout(r, 0));
+      const resolvedGroups = applyGroupConflictResolutions(groupedResult.groups, groupSelections);
+
+      const zipInput: Record<string, Uint8Array> = {};
+      for (const group of resolvedGroups) {
+        const manifest = buildFxManifest(group.files);
+        zipInput[`${group.resourceName}/fxmanifest.lua`] = new TextEncoder().encode(manifest);
+        for (const file of group.files) {
+          zipInput[`${group.resourceName}/${file.resourcePath}`] = file.data;
+        }
+      }
+
+      downloadZip(zipInput, "fivem_resources.zip");
+    } finally {
+      setDownloading(false);
+    }
+  }, [groupedResult, groupSelections]);
+
+  const streamCount = singleResult?.resolved.filter((f) => f.resourcePath.startsWith("stream/")).length ?? 0;
+  const dataCount = singleResult?.resolved.filter((f) => f.resourcePath.startsWith("data/")).length ?? 0;
 
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100">
@@ -109,6 +172,32 @@ function App() {
           dlc.rpf はネストした RPF も含めて自動展開します(暗号化 RPF は非対応)。
         </p>
 
+        <div className="flex items-center gap-2 mb-4 text-sm">
+          <span className="text-gray-500">出力形式:</span>
+          <button
+            onClick={() => handleModeChange("single")}
+            className={`px-3 py-1.5 rounded-lg transition-colors ${
+              mode === "single" ? "bg-blue-600 text-white" : "bg-gray-800 text-gray-400 hover:bg-gray-700"
+            }`}
+          >
+            1つのリソースにまとめる
+          </button>
+          <button
+            onClick={() => handleModeChange("split")}
+            className={`px-3 py-1.5 rounded-lg transition-colors ${
+              mode === "split" ? "bg-blue-600 text-white" : "bg-gray-800 text-gray-400 hover:bg-gray-700"
+            }`}
+          >
+            フォルダ単位で別リソースに分割
+          </button>
+        </div>
+        {mode === "split" && (
+          <p className="text-gray-500 text-xs mb-4">
+            複数の武器を1つの zip にまとめた配布物(例: 武器コレクション)向け。各トップレベルフォルダを個別の
+            FiveM リソースとして出力するため、フォルダ間で共有アタッチメント名が中身違いで重複していても競合しません。
+          </p>
+        )}
+
         <DropZone disabled={analyzing} onLoaded={handleLoaded} onError={handleError} />
 
         {analyzing && <div className="mt-6 text-center text-gray-400">解析中...</div>}
@@ -117,7 +206,7 @@ function App() {
           <div className="mt-6 bg-red-900/40 border border-red-700 rounded-lg p-4 text-red-300">{error}</div>
         )}
 
-        {result && (
+        {mode === "single" && singleResult && (
           <div className="mt-6 space-y-4">
             <div className="flex items-center gap-4 text-sm text-gray-400">
               <span className="font-mono">{sourceName}</span>
@@ -143,19 +232,52 @@ function App() {
               />
             </div>
 
-            <ConflictResolver conflicts={result.conflicts} selections={selections} onSelect={handleSelect} />
-            <IssueList issues={result.issues} />
+            <ConflictResolver conflicts={singleResult.conflicts} selections={singleSelections} onSelect={handleSingleSelect} />
+            <IssueList issues={singleResult.issues} />
 
             <button
-              onClick={handleDownload}
-              disabled={downloading || unresolvedConflicts > 0 || result.resolved.length + result.conflicts.length === 0}
+              onClick={handleDownloadSingle}
+              disabled={
+                downloading || unresolvedSingleConflicts > 0 || singleResult.resolved.length + singleResult.conflicts.length === 0
+              }
               className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-sm font-medium transition-colors"
             >
               {downloading
                 ? "作成中..."
-                : unresolvedConflicts > 0
-                  ? `競合を解決してください (残り${unresolvedConflicts}件)`
+                : unresolvedSingleConflicts > 0
+                  ? `競合を解決してください (残り${unresolvedSingleConflicts}件)`
                   : "FiveM リソース ZIP をダウンロード"}
+            </button>
+          </div>
+        )}
+
+        {mode === "split" && groupedResult && (
+          <div className="mt-6 space-y-4">
+            <div className="flex items-center gap-4 text-sm text-gray-400">
+              <span className="font-mono">{sourceName}</span>
+              <span>&middot;</span>
+              <span>{groupedResult.groups.length} リソースに分割</span>
+              {errorCount > 0 && (
+                <>
+                  <span>&middot;</span>
+                  <span className="text-red-400">除外: {errorCount}</span>
+                </>
+              )}
+            </div>
+
+            <GroupedResultView result={groupedResult} selections={groupSelections} onSelect={handleGroupSelect} />
+            <IssueList issues={groupedResult.issues} />
+
+            <button
+              onClick={handleDownloadGroups}
+              disabled={downloading || unresolvedGroupConflicts > 0 || groupedResult.groups.length === 0}
+              className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-sm font-medium transition-colors"
+            >
+              {downloading
+                ? "作成中..."
+                : unresolvedGroupConflicts > 0
+                  ? `競合を解決してください (残り${unresolvedGroupConflicts}件)`
+                  : `${groupedResult.groups.length}個の FiveM リソースを ZIP でダウンロード`}
             </button>
           </div>
         )}
@@ -172,6 +294,17 @@ function App() {
       </div>
     </div>
   );
+}
+
+function downloadZip(zipInput: Record<string, Uint8Array>, downloadName: string) {
+  const zipped = zipSync(zipInput);
+  const blob = new Blob([zipped as Uint8Array<ArrayBuffer>], { type: "application/zip" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = downloadName;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 export default App;
