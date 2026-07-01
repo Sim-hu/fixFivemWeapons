@@ -1,4 +1,5 @@
 import { readRSC7Header } from "./rsc7";
+import { isRPF7, isEncryptedRPF, extractAllFiles } from "./rpf-parser";
 import {
   STREAM_EXTENSIONS,
   DATA_EXTENSIONS,
@@ -61,14 +62,64 @@ async function sha256Hex(data: Uint8Array): Promise<string> {
     .join("");
 }
 
+// GTA5-Mods の addon 系 mod は dlc.rpf (中に weapons.rpf 等をネストして含む
+// DLC パック) のまま配布されることが多い。展開しないと中の .ydr/.ytd/.meta に
+// 届かず、RPF アーカイブそのものを stream/ に置いてしまう致命的な誤配置になる。
+function expandArchives(sourceFiles: Map<string, Uint8Array>, issues: AnalyzeIssue[]): Map<string, Uint8Array> {
+  const expanded = new Map<string, Uint8Array>();
+
+  for (const [rawPath, data] of sourceFiles) {
+    const normalized = normalizeArchivePath(rawPath);
+    if (!normalized) continue;
+
+    if (getExtension(normalized) === "rpf") {
+      if (!isRPF7(data)) {
+        issues.push({
+          severity: "error",
+          path: normalized,
+          message: "RPF7ヘッダーが不正です(壊れているか対応していない形式)。展開できないため除外されます。",
+        });
+        continue;
+      }
+      if (isEncryptedRPF(data)) {
+        issues.push({
+          severity: "error",
+          path: normalized,
+          message:
+            "暗号化(AES/NG)された RPF は非対応です。OpenIV/CodeWalker 等で復号・展開してから中身のファイルをアップロードし直してください。",
+        });
+        continue;
+      }
+      try {
+        const inner = extractAllFiles(data);
+        for (const [innerPath, innerData] of inner) {
+          expanded.set(`${normalized}/${innerPath}`, innerData);
+        }
+      } catch (e) {
+        issues.push({
+          severity: "error",
+          path: normalized,
+          message: `RPFの展開に失敗しました: ${e instanceof Error ? e.message : String(e)}`,
+        });
+      }
+      continue;
+    }
+
+    expanded.set(normalized, data);
+  }
+
+  return expanded;
+}
+
 export async function analyzeSourceFiles(
   sourceFiles: Map<string, Uint8Array>,
   sourceFileName: string,
 ): Promise<AnalyzeResult> {
   const issues: AnalyzeIssue[] = [];
   const grouped = new Map<string, { sourcePath: string; data: Uint8Array }[]>();
+  const expandedFiles = expandArchives(sourceFiles, issues);
 
-  for (const [rawPath, data] of sourceFiles) {
+  for (const [rawPath, data] of expandedFiles) {
     const normalized = normalizeArchivePath(rawPath);
     if (!normalized || shouldExcludeFromResource(normalized)) continue;
 
@@ -241,7 +292,13 @@ function normalizeArchivePath(path: string): string {
 }
 
 function shouldExcludeFromResource(path: string): boolean {
-  return EXCLUDED_EXTENSIONS.has(getExtension(path)) || EXCLUDED_FILENAMES.has(getBaseName(path).toLowerCase());
+  const ext = getExtension(path);
+  if (EXCLUDED_EXTENSIONS.has(ext)) return true;
+  if (EXCLUDED_FILENAMES.has(getBaseName(path).toLowerCase())) return true;
+  // stream/data のどちらにも属さない拡張子 (readme.txt 等の同梱ファイル) は
+  // FiveM リソースとして無意味なので混入させない。
+  if (!STREAM_EXTENSIONS.has(ext) && !DATA_EXTENSIONS.has(ext)) return true;
+  return false;
 }
 
 // FiveM リソースは stream/ と data/ のフラット構造を取る。DLC RPF の
