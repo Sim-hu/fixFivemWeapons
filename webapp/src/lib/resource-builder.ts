@@ -18,8 +18,14 @@ const META_DATA_FILE_TYPES: Array<{ pattern: RegExp; type: string }> = [
   { pattern: /(^|\/)vehiclelayouts\.meta$/i, type: "VEHICLE_LAYOUTS_FILE" },
   { pattern: /(^|\/)contentunlocks\.meta$/i, type: "CONTENT_UNLOCKING_META" },
   { pattern: /(^|\/)dlctext\.meta$/i, type: "DLC_TEXT_FILE" },
-  { pattern: /(^|\/)weapon(?:animations|archetypes|components|pedpersonality|s)?\.meta$/i, type: "WEAPONINFO_FILE" },
-  { pattern: /(^|\/)weapon(?:animations|archetypes|components|pedpersonality|s)?[^/]*\.meta$/i, type: "WEAPONINFO_FILE" },
+  // weapon 系の meta はそれぞれ別の data_file タイプが必要。まとめて
+  // WEAPONINFO_FILE として登録すると weaponarchetypes.meta (モデル名/txd名の
+  // 対応表) が読み込まれず、「装備アニメーションはするがモデルが見えない」
+  // 症状になる。より具体的なパターンを先に評価する必要がある。
+  { pattern: /(^|\/)weaponcomponents[^/]*\.meta$/i, type: "WEAPONCOMPONENTSINFO_FILE" },
+  { pattern: /(^|\/)weaponarchetypes[^/]*\.meta$/i, type: "WEAPON_METADATA_FILE" },
+  { pattern: /(^|\/)weaponanimations[^/]*\.meta$/i, type: "WEAPON_ANIMATIONS_FILE" },
+  { pattern: /(^|\/)weapon(?:pedpersonality)?s?[^/]*\.meta$/i, type: "WEAPONINFO_FILE" },
   { pattern: /(^|\/)pedpersonality\.meta$/i, type: "PED_PERSONALITY_FILE" },
   { pattern: /(^|\/)peds\.meta$/i, type: "PED_METADATA_FILE" },
   { pattern: /(^|\/)shop_vehicle\.meta$/i, type: "VEHICLE_SHOP_DLC_FILE" },
