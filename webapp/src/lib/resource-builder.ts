@@ -222,6 +222,7 @@ const STRUCTURAL_SEGMENTS = new Set([
   "data",
   "meta",
   "metas",
+  "ai",
   "x64",
   "models",
   "cdimages",
@@ -232,12 +233,39 @@ const STRUCTURAL_SEGMENTS = new Set([
   "weapons",
 ]);
 
-function guessGroupKey(normalizedPath: string): string {
-  const segments = normalizedPath.split("/").slice(0, -1);
+function isStructuralSegment(segment: string): boolean {
+  const lower = segment.toLowerCase();
+  return STRUCTURAL_SEGMENTS.has(lower) || lower.endsWith(".rpf");
+}
+
+// ZIP やフォルダドロップは "ggc-weapons/" や "GGC-Weapons-main/" のような、
+// 武器名とは無関係な単一のコンテナフォルダを先頭に含むことが多い。全ファイルが
+// 共通して持つ先頭セグメントを検出し、意味のある構造名 (stream 等) に
+// たどり着くまで読み飛ばす段数を返す。
+function countCommonContainerDepth(paths: string[]): number {
+  let depth = 0;
+  while (depth < 5) {
+    const seen = new Set<string>();
+    let allDeepEnough = true;
+    for (const p of paths) {
+      const segs = p.split("/");
+      if (segs.length <= depth + 1) {
+        allDeepEnough = false;
+        break;
+      }
+      seen.add(segs[depth]!.toLowerCase());
+    }
+    if (!allDeepEnough || seen.size !== 1) break;
+    if (isStructuralSegment([...seen][0]!)) break;
+    depth++;
+  }
+  return depth;
+}
+
+function guessGroupKey(normalizedPath: string, skipSegments = 0): string {
+  const segments = normalizedPath.split("/").slice(skipSegments, -1);
   for (const seg of segments) {
-    const lower = seg.toLowerCase();
-    if (STRUCTURAL_SEGMENTS.has(lower)) continue;
-    if (lower.endsWith(".rpf")) continue;
+    if (isStructuralSegment(seg)) continue;
     return seg;
   }
   return "(root)";
@@ -261,11 +289,17 @@ export async function analyzeSourceFilesAsGroups(
   const issues: AnalyzeIssue[] = [];
   const expandedFiles = expandArchives(sourceFiles, issues);
 
-  const byGroup = new Map<string, Map<string, Uint8Array>>();
+  const normalizedEntries: { path: string; data: Uint8Array }[] = [];
   for (const [rawPath, data] of expandedFiles) {
     const normalized = normalizeArchivePath(rawPath);
-    if (!normalized) continue;
-    const groupKey = guessGroupKey(normalized);
+    if (normalized) normalizedEntries.push({ path: normalized, data });
+  }
+
+  const containerDepth = countCommonContainerDepth(normalizedEntries.map((f) => f.path));
+
+  const byGroup = new Map<string, Map<string, Uint8Array>>();
+  for (const { path: normalized, data } of normalizedEntries) {
+    const groupKey = guessGroupKey(normalized, containerDepth);
     const bucket = byGroup.get(groupKey) ?? new Map<string, Uint8Array>();
     bucket.set(normalized, data);
     byGroup.set(groupKey, bucket);
