@@ -1,8 +1,26 @@
 import { unzip } from "fflate";
+import { createExtractorFromData } from "node-unrar-js/esm/index.esm.js";
+import unrarWasmUrl from "node-unrar-js/esm/js/unrar.wasm?url";
 
-// アップロードされた ZIP を { 相対パス: バイト列 } に展開する。
+export type SupportedArchiveExtension = "zip" | "rar";
+
+export function getSupportedArchiveExtension(file: File): SupportedArchiveExtension | null {
+  const name = file.name.toLowerCase();
+  if (name.endsWith(".zip")) return "zip";
+  if (name.endsWith(".rar")) return "rar";
+  return null;
+}
+
+// アップロードされた ZIP / RAR を { 相対パス: バイト列 } に展開する。
 // GTA5-Mods 配布物はフォルダ階層 (weapons.rpf 内の cdimages 相当) を
-// 保持したまま zip 化されていることが多いので、パスはそのまま保持する。
+// 保持したままアーカイブ化されていることが多いので、パスはそのまま保持する。
+export async function parseArchiveFile(file: File): Promise<Map<string, Uint8Array>> {
+  const extension = getSupportedArchiveExtension(file);
+  if (extension === "zip") return parseZipFile(file);
+  if (extension === "rar") return parseRarFile(file);
+  throw new Error("ZIP または RAR ファイルを選択してください");
+}
+
 export function parseZipFile(file: File): Promise<Map<string, Uint8Array>> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -17,13 +35,41 @@ export function parseZipFile(file: File): Promise<Map<string, Uint8Array>> {
         const map = new Map<string, Uint8Array>();
         for (const [path, data] of Object.entries(unzipped)) {
           if (path.endsWith("/")) continue; // ディレクトリエントリ
-          map.set(path, data);
+          map.set(normalizeArchivePath(path), data);
         }
         resolve(map);
       });
     };
     reader.readAsArrayBuffer(file);
   });
+}
+
+async function parseRarFile(file: File): Promise<Map<string, Uint8Array>> {
+  const [data, wasmBinary] = await Promise.all([file.arrayBuffer(), loadUnrarWasm()]);
+  const extractor = await createExtractorFromData({ data, wasmBinary });
+  const extracted = extractor.extract();
+  const map = new Map<string, Uint8Array>();
+
+  for (const entry of extracted.files) {
+    if (entry.fileHeader.flags.directory || !entry.extraction) continue;
+    map.set(normalizeArchivePath(entry.fileHeader.name), entry.extraction);
+  }
+
+  return map;
+}
+
+let unrarWasmPromise: Promise<ArrayBuffer> | null = null;
+
+function loadUnrarWasm(): Promise<ArrayBuffer> {
+  unrarWasmPromise ??= fetch(unrarWasmUrl).then((response) => {
+    if (!response.ok) throw new Error("RAR 展開用モジュールの読み込みに失敗しました");
+    return response.arrayBuffer();
+  });
+  return unrarWasmPromise;
+}
+
+function normalizeArchivePath(path: string): string {
+  return path.replace(/\\/g, "/");
 }
 
 // フォルダのドラッグ&ドロップ (DataTransferItem.webkitGetAsEntry) にも対応する。
