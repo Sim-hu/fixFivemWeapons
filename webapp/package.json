@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "fflate": "^0.8.2",
+    "node-unrar-js": "^2.0.2",
     "pako": "^2.1.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"

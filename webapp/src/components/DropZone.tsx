@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from "react";
-import { parseDroppedEntries, parseZipFile } from "../lib/zip-input";
+import { getSupportedArchiveExtension, parseArchiveFile, parseDroppedEntries } from "../lib/zip-input";
 
 interface DropZoneProps {
   disabled?: boolean;
@@ -15,15 +15,15 @@ export function DropZone({ disabled, onLoaded, onError }: DropZoneProps) {
     async (fileList: FileList) => {
       const file = fileList[0];
       if (!file) return;
-      if (!file.name.toLowerCase().endsWith(".zip")) {
-        onError("ZIP ファイルを選択してください (GTA5-Mods 等からダウンロードした .zip をそのまま指定できます)");
+      if (!getSupportedArchiveExtension(file)) {
+        onError("ZIP または RAR ファイルを選択してください (GTA5-Mods 等からダウンロードした .zip / .rar をそのまま指定できます)");
         return;
       }
       try {
-        const map = await parseZipFile(file);
+        const map = await parseArchiveFile(file);
         onLoaded(map, file.name);
       } catch (e) {
-        onError(e instanceof Error ? e.message : "ZIP の展開に失敗しました");
+        onError(e instanceof Error ? e.message : "アーカイブの展開に失敗しました");
       }
     },
     [onLoaded, onError],
@@ -69,11 +69,11 @@ export function DropZone({ disabled, onLoaded, onError }: DropZoneProps) {
       <input
         ref={inputRef}
         type="file"
-        accept=".zip"
+        accept=".zip,.rar"
         className="hidden"
         onChange={(e) => e.target.files && handleFiles(e.target.files)}
       />
-      <p className="text-gray-300 font-medium">ZIP をドラッグ&ドロップ、またはクリックして選択</p>
+      <p className="text-gray-300 font-medium">ZIP / RAR をドラッグ&ドロップ、またはクリックして選択</p>
       <p className="text-gray-500 text-sm mt-2">
         フォルダのドラッグ&ドロップにも対応(.ydr / .ytd / .ybn / .ymt / .meta などを含む展開済みフォルダ)
       </p>
