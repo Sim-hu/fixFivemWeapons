@@ -75,7 +75,7 @@ export function DropZone({ disabled, onLoaded, onError }: DropZoneProps) {
       />
       <p className="text-gray-300 font-medium">ZIP / RAR をドラッグ&ドロップ、またはクリックして選択</p>
       <p className="text-gray-500 text-sm mt-2">
-        フォルダのドラッグ&ドロップにも対応(.ydr / .ytd / .ybn / .ymt / .meta などを含む展開済みフォルダ)
+        フォルダのドラッグ&ドロップにも対応(.ydr / .ydd / .ytd / .ybn / .yld / .ymt / .meta などを含む展開済みフォルダ)
       </p>
       <p className="text-gray-600 text-xs mt-3">サーバーへのアップロードは行わず、すべてブラウザ内で処理します</p>
     </div>
