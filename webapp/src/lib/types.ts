@@ -13,6 +13,7 @@ export const STREAM_EXTENSIONS = new Set([
   "ydd",
   "ydr",
   "yft",
+  "yld",
   "ymap",
   "ynv",
   "ytyp",
