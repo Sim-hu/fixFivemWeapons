@@ -165,11 +165,12 @@ function App() {
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100">
       <div className="max-w-4xl mx-auto px-4 py-8">
-        <h1 className="text-2xl font-bold mb-2">FiveM Weapon Fixer</h1>
+        <h1 className="text-2xl font-bold mb-2">FiveM Weapon / Clothing Fixer</h1>
         <p className="text-gray-400 text-sm mb-6">
-          GTA5-Mods 等で配布されている武器 mod (fxmanifest.lua も stream/ 構造も無い生の .ydr / .ytd
-          一式、または dlc.rpf に入った addon 形式) をアップロードすると、FiveM リソースとして読み込める形に自動変換します。
-          dlc.rpf はネストした RPF も含めて自動展開します(暗号化 RPF は非対応)。
+          GTA5-Mods 等で配布されている武器・服 mod (fxmanifest.lua も stream/ 構造も無い生の .ydr / .ydd /
+          .ytd / .ymt / .meta 一式、または dlc.rpf に入った addon 形式) をアップロードすると、FiveM
+          リソースとして読み込める形に自動変換します。dlc.rpf はネストした RPF も含めて自動展開します(暗号化 RPF
+          は非対応)。
         </p>
 
         <div className="flex items-center gap-2 mb-4 text-sm">
@@ -193,8 +194,8 @@ function App() {
         </div>
         {mode === "split" && (
           <p className="text-gray-500 text-xs mb-4">
-            複数の武器を1つの zip にまとめた配布物(例: 武器コレクション)向け。各トップレベルフォルダを個別の
-            FiveM リソースとして出力するため、フォルダ間で共有アタッチメント名が中身違いで重複していても競合しません。
+            複数の武器や衣装を1つの zip にまとめた配布物向け。各トップレベルフォルダを個別の FiveM
+            リソースとして出力するため、フォルダ間で共有アタッチメント名や同名 drawable が中身違いで重複していても競合しません。
           </p>
         )}
 
@@ -286,8 +287,8 @@ function App() {
           <p>すべての処理はブラウザ内で完結し、サーバーへのアップロードは行いません。</p>
           <p>
             「差し替え(replace)」mod は stream/ 配下に元と同名のファイルを置くだけで既存アセットが自動的に
-            上書きされる FiveM の仕組みを利用しています。「追加(addon)」mod は weapons.meta 等を data/
-            に配置し fxmanifest.lua に data_file 宣言を自動追加しますが、配布ページ記載の別 mod
+            上書きされる FiveM の仕組みを利用しています。「追加(addon)」mod は weapons.meta や服 addon 用の
+            .ymt/.meta を data/ に配置し fxmanifest.lua に data_file 宣言を自動追加しますが、配布ページ記載の別 mod
             (共有アタッチメント定義など)への依存は自動解決できないため、readme の説明も確認してください。
           </p>
         </div>
