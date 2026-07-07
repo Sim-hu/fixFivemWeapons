@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useState, type ChangeEvent } from "react";
 import { zipSync } from "fflate";
 import { DropZone } from "./components/DropZone";
 import { IssueList } from "./components/IssueList";
@@ -14,6 +14,12 @@ import {
   type AnalyzeResult,
   type GroupedAnalyzeResult,
 } from "./lib/resource-builder";
+import {
+  buildWeaponOutputFiles,
+  detectReplaceWeapon,
+  type ReplaceWeaponInfo,
+  type WeaponOutputMode,
+} from "./lib/weapon-addon-builder";
 
 type Mode = "single" | "split";
 
@@ -27,6 +33,8 @@ function App() {
   const [singleResult, setSingleResult] = useState<AnalyzeResult | null>(null);
   const [singleSelections, setSingleSelections] = useState<Map<string, string>>(new Map());
   const [resourceName, setResourceName] = useState("");
+  const [keepReplaceWeaponMode, setKeepReplaceWeaponMode] = useState(false);
+  const [replaceWeaponInfo, setReplaceWeaponInfo] = useState<ReplaceWeaponInfo | null>(null);
 
   const [groupedResult, setGroupedResult] = useState<GroupedAnalyzeResult | null>(null);
   const [groupSelections, setGroupSelections] = useState<Map<string, string>>(new Map());
@@ -39,6 +47,8 @@ function App() {
     setGroupedResult(null);
     setSingleSelections(new Map());
     setGroupSelections(new Map());
+    setKeepReplaceWeaponMode(false);
+    setReplaceWeaponInfo(null);
   }, []);
 
   const runAnalysis = useCallback(async (files: Map<string, Uint8Array>, name: string, targetMode: Mode) => {
@@ -47,11 +57,15 @@ function App() {
     try {
       if (targetMode === "single") {
         const analyzed = await analyzeSourceFiles(files, name);
+        const replaceWeapon = detectReplaceWeapon(analyzed.resolved, analyzed.conflicts, name);
         setSingleResult(analyzed);
-        setResourceName(analyzed.rootNameGuess);
+        setReplaceWeaponInfo(replaceWeapon);
+        setResourceName(replaceWeapon?.suggestedAddonSlug ?? analyzed.rootNameGuess);
+        setKeepReplaceWeaponMode(false);
       } else {
         const analyzed = await analyzeSourceFilesAsGroups(files);
         setGroupedResult(analyzed);
+        setReplaceWeaponInfo(null);
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : "解析に失敗しました");
@@ -115,14 +129,22 @@ function App() {
     return issues?.filter((i) => i.severity === "error").length ?? 0;
   }, [mode, singleResult, groupedResult]);
 
+  const visibleReplaceWeaponInfo = mode === "single" ? replaceWeaponInfo : null;
+  const weaponOutputMode: WeaponOutputMode = keepReplaceWeaponMode ? "replace" : "addon";
+
   const handleDownloadSingle = useCallback(async () => {
     if (!singleResult) return;
     setDownloading(true);
     try {
       await new Promise((r) => setTimeout(r, 0));
-      const files = applyConflictResolutions(singleResult, singleSelections);
-      const manifest = buildFxManifest(files);
       const rootName = sanitizeResourceName(resourceName || singleResult.rootNameGuess);
+      const selectedFiles = applyConflictResolutions(singleResult, singleSelections);
+      const files = buildWeaponOutputFiles(selectedFiles, {
+        addonSlug: rootName,
+        replaceWeapon: replaceWeaponInfo,
+        weaponOutputMode,
+      });
+      const manifest = buildFxManifest(files);
 
       const zipInput: Record<string, Uint8Array> = {
         [`${rootName}/fxmanifest.lua`]: new TextEncoder().encode(manifest),
@@ -135,7 +157,7 @@ function App() {
     } finally {
       setDownloading(false);
     }
-  }, [singleResult, singleSelections, resourceName]);
+  }, [singleResult, singleSelections, resourceName, replaceWeaponInfo, weaponOutputMode]);
 
   const handleDownloadGroups = useCallback(async () => {
     if (!groupedResult) return;
@@ -228,10 +250,28 @@ function App() {
               <input
                 type="text"
                 value={resourceName}
-                onChange={(e) => setResourceName(e.target.value)}
+                onChange={(e: ChangeEvent<HTMLInputElement>) => setResourceName(e.target.value)}
                 className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 font-mono focus:outline-none focus:border-blue-500"
               />
             </div>
+
+            {visibleReplaceWeaponInfo && (
+              <div className="bg-gray-900/60 border border-gray-700 rounded-lg p-3 text-sm text-gray-300 space-y-2">
+                <label className="flex items-center gap-2 cursor-pointer w-fit">
+                  <input
+                    type="checkbox"
+                    checked={keepReplaceWeaponMode}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setKeepReplaceWeaponMode(e.target.checked)}
+                    className="accent-blue-600"
+                  />
+                  <span>リプレイス形式のまま出力する</span>
+                </label>
+                <p className="text-xs text-gray-500">
+                  {visibleReplaceWeaponInfo.weaponName} ({visibleReplaceWeaponInfo.modelBase}) の差し替え武器を検出しました。未チェックなら
+                  stream名をリネームし、addon武器用の weapons.meta / weaponarchetypes.meta / weaponcomponents.meta を生成します。
+                </p>
+              </div>
+            )}
 
             <ConflictResolver conflicts={singleResult.conflicts} selections={singleSelections} onSelect={handleSingleSelect} />
             <IssueList issues={singleResult.issues} />
@@ -247,7 +287,9 @@ function App() {
                 ? "作成中..."
                 : unresolvedSingleConflicts > 0
                   ? `競合を解決してください (残り${unresolvedSingleConflicts}件)`
-                  : "FiveM リソース ZIP をダウンロード"}
+                  : visibleReplaceWeaponInfo && !keepReplaceWeaponMode
+                    ? "Add-on 武器リソース ZIP をダウンロード"
+                    : "FiveM リソース ZIP をダウンロード"}
             </button>
           </div>
         )}
@@ -286,9 +328,9 @@ function App() {
         <div className="mt-10 text-xs text-gray-600 space-y-1">
           <p>すべての処理はブラウザ内で完結し、サーバーへのアップロードは行いません。</p>
           <p>
-            「差し替え(replace)」mod は stream/ 配下に元と同名のファイルを置くだけで既存アセットが自動的に
-            上書きされる FiveM の仕組みを利用しています。「追加(addon)」mod は weapons.meta や服 addon 用の
-            .ymt/.meta を data/ に配置し fxmanifest.lua に data_file 宣言を自動追加しますが、配布ページ記載の別 mod
+            「差し替え(replace)」mod は既定では addon 武器として出力します。必要な場合は検出後に表示されるチェックで
+            リプレイス形式のまま出力できます。「追加(addon)」mod は weapons.meta や服 addon 用の .ymt/.meta を data/
+            に配置し fxmanifest.lua に data_file 宣言を自動追加しますが、配布ページ記載の別 mod
             (共有アタッチメント定義など)への依存は自動解決できないため、readme の説明も確認してください。
           </p>
         </div>
